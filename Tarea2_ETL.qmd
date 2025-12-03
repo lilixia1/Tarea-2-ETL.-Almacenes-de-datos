@@ -1,0 +1,69 @@
+---
+title: "Tarea 2: Integración de Datos"
+subtitle: "Asignatura: Almacenes de Datos"
+author: "Adriana Jubera, Xian Li Xia"
+date: today
+format: 
+  pdf:
+    title-page: true
+    toc: true
+    toc-title: "Índice"
+    number-sections: true
+    colorlinks: true
+    highlight-style: github
+    fontsize: 11pt
+    geometry: "margin=1in"
+editor: visual
+---
+```{r setup, include=FALSE}
+#se ejecuta solo una vez, si no tenemos miktex en el pc
+#install.packages("tinytex")
+#tinytex::install_tinytex()
+
+knitr::opts_chunk$set(
+    echo = FALSE, 
+    message = FALSE, 
+    warning = FALSE,
+    # Define el tamaño por defecto de las figuras generadas por R
+    fig.width = 6, 
+    fig.height = 4
+)
+```
+
+# Carga de datos de NorthwindDW
+
+# Carga de datos de UCI
+## Cambios en el diseño del almacén 
+### Modelo conceptual final
+### Modelo relacional final
+
+## Creación de la base derivada
+
+## Realización del ETL
+
+## Dificultades encontradas
+
+## Conclusión
+
+## Bibliografía
+
+```sql
+SELECT 
+    nombreEtnia,
+    COUNT(idPaciente) AS TotalPacientes
+FROM 
+    Pacientes p
+JOIN 
+    Etnia e ON p.fk_idEtnia = e.idEtnia;
+```
+
+```{r sql_query_etnia, eval=FALSE, echo=TRUE}
+-- Este código se mostrará, pero no se ejecutará
+SELECT 
+    nombreEtnia,
+    COUNT(idPaciente) AS TotalPacientes
+FROM 
+    Pacientes p
+JOIN 
+    Etnia e ON p.fk_idEtnia = e.idEtnia;
+```
