@@ -716,11 +716,56 @@ FROM dbo.Medication AS m;
 
 #### 3.7 Carga Hospital por completar
 
-No se realizó ninguna consulta, se seleccionó directamente la tabla **Hospital**.
+La dimensión Hospital no requiere cálculos ni transformaciones complejas.
+
+Proceso realizado
+
+1. Extracción directa
+Se toma la tabla Hospital completa desde la base de datos transaccional.
+
+
+2. Conversión de datos
+Se normalizan tipos de datos y se convierten cadenas Unicode.
+
+
+3. Lookups
+- Región: asigna la clave sustituta de la dimensión Region.
+
+- Tamaño (número de camas): se vincula con la dimensión TamanoHospital.
+
+
+4. Carga final
+Se inserta cada hospital en la dimensión correspondiente del DW.
 
 ![Carga Hospital](imagenes/Carga%20Hospital.png)
 
-### 4. **Carga del Hecho: Ingreso UCI** por completar
+### 4. **Carga del Hecho: Ingreso UCI**
+El hecho IngresoUCI integra múltiples fuentes y cálculos porque resume el episodio clínico del paciente en la UCI.
+
+Proceso realizado
+
+1. Extracción y preparación de datos
+Se calculan varias métricas relacionadas con:
+
+- Apache Final. Selecciona el registro APACHE más reciente para cada estancia.
+Convierte valores inválidos (-1) en NULL.
+Mantiene apacheScore y mortalidadProbabilidad.
+
+- Ventilacion. Se extrae la duración total de ventilación, número de episodios ventilatorios y un indicador binario de si el paciente fue ventilado.
+
+- Respiración. Obtiene frecuencia respiratoria máxima y mínima desde vitalPeriodic.
+
+
+2. Cálculos clave
+Desde la tabla patient se derivan:
+
+- duracionAdmision = desplazamiento desde ingreso hospitalario.
+- duracionUCI = offset de alta de UCI.
+- estadoAlta = condición al alta de la unidad.
+
+
+3. Union de datos
+Se combinan los resultados mediante LEFT JOIN, garantizando que todos los ingresos aparezcan aunque falten datos en APACHE o ventilación.
 
 ``` sql
 WITH ApacheFinal AS (
@@ -795,6 +840,9 @@ LEFT JOIN Ventilacion v
 LEFT JOIN Respiracion r
        ON r.patientUnitStayID = p.patientUnitStayID;
 ```
+
+4. Carga final
+El resultado se envía directamente al destino ADO NET, alimentando la tabla de hechos IngresoUCI.
 
 ![Carga IngresoUCI](Carga%20IngresoUCI.png)
 
