@@ -1,6 +1,3 @@
-
-
-
 ---
 title: "Tarea 2: Integración de Datos"
 subtitle: "Asignatura: Almacenes de Datos"
@@ -567,33 +564,12 @@ Para concluir, el flujo se dirige a la tabla Tratamiento del DW, utilizando ADO.
 
 ![Carga Tratamiento](imagenes/Carga%20Tratamiento.png)
 
-#### 3.4 Carga Paciente por completar
+#### 3.4 Carga Paciente
 
 Para cargar la dimensión Paciente se diseñó un flujo ETL compuesto por cuatro pasos:
 
 1. Extracción:
 Desde la tabla **Patient** de la base de datos se seleccionan los pacientes mediante la consulta:
-
-
-
-2. Conversión de datos:
-Se utiliza un componente Data Conversion para transformar los campos gender y ethnicity de Unicode (DT_WSTR) a cadenas con longitud compatibles con las dimensiones del DW.
-
-
-3. Lookups:
-Se aplican dos búsquedas:
-
-Lookup de etnia: empareja la columna ethnicity con la dimensión Etnia y obtiene su clave sustituta (idEtnia).
-
-Lookup de género: hace lo mismo con la dimensión Genero, obteniendo idGenero.
-
-
-Esto garantiza la integridad referencial y permite seguir el esquema en copo de nieve definido en el diseño lógico.
-
-
-4. Carga:
-Finalmente, los datos depurados y con claves sustitutas se insertan en la tabla Paciente del Data Warehouse mediante un ADO NET Destination.
-La clave primaria del paciente corresponde con *uniquePID*.
 ```sql
 WITH Pac AS (
     SELECT
@@ -616,6 +592,26 @@ SELECT
 FROM Pac
 GROUP BY uniquePID;
 ```
+
+
+2. Conversión de datos:
+Se utiliza un componente Data Conversion para transformar los campos gender y ethnicity de Unicode (DT_WSTR) a cadenas con longitud compatibles con las dimensiones del DW.
+
+
+3. Lookups:
+Se aplican dos búsquedas:
+
+Lookup de etnia: empareja la columna ethnicity con la dimensión Etnia y obtiene su clave sustituta (idEtnia).
+
+Lookup de género: hace lo mismo con la dimensión Genero, obteniendo idGenero.
+
+
+Esto garantiza la integridad referencial y permite seguir el esquema en copo de nieve definido en el diseño lógico.
+
+
+4. Carga:
+Finalmente, los datos depurados y con claves sustitutas se insertan en la tabla Paciente del Data Warehouse mediante un ADO NET Destination.
+La clave primaria del paciente corresponde con *uniquePID*.
 
 ![Carga Paciente](Carga%20Paciente.png)
 
