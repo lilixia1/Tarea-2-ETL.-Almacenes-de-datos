@@ -1,0 +1,867 @@
+---
+title: "Tarea 2: Integración de Datos"
+subtitle: "Asignatura: Almacenes de Datos"
+author: "Adriana Jubera, Xian Li Xia"
+date: today
+format: 
+  pdf:
+    title-page: true
+    toc: true
+    toc-title: "Índice"
+    number-sections: true
+    colorlinks: true
+    highlight-style: github
+    fontsize: 11pt
+    geometry: "margin=1in"
+editor: visual
+---
+
+```{r setup, include=FALSE}
+#se ejecuta solo una vez, si no tenemos miktex en el pc o si no tenemos el paquete knitr
+#install.packages("tinytex")
+#tinytex::install_tinytex()
+# install.packages("knitr")
+
+library(knitr)
+knitr::opts_chunk$set(
+    echo = FALSE, 
+    message = FALSE, 
+    warning = FALSE,
+    # Define el tamaño por defecto de las figuras generadas por R
+    fig.width = 6, 
+    fig.height = 4
+)
+```
+
+# Carga de datos de NorthwindDW
+
+![Carga de NorthwindDW](imagenes/ETLNorthwind.png)
+
+# Carga de datos de UCI
+
+En la anterior tarea se realizó el diseño del almacén en base a *eICU Collaborative Research Database*, pero esta primera estructura incluía ciertos errores o inconsistencias que vamos a corregir a continuación. Es fundamental la correcta implementación de la arquitectura, ya que permitirá que la carga de datos se ejecute en óptimas condiciones, además de poder realizar consultas de interés.
+
+## Cambios en el diseño del almacén
+
+Las distintas modificaciones que se han llevado a cabo son las siguientes:
+
+1.  **Nueva dimensión Cuidados Respiratorios.** Se añadió esta tabla para incluir datos relevantes respecto a nuestro filtro de interés, ingresos relacionados con problemas respiratorios. Además, se le añadió un nivel **ViaAérea**, que comprende los valores: *Laryngectomy, Tracheostomy, Oral ETT*.
+
+2.  **Corrección en las relaciones que debían ser N:M y no 1:N.** Se modificaron las relaciones entre **IngresoUCI** con **Diagnosis**, **Medicacion**, **Admisión** y **Tratamiento**, ya que un ingreso puede tener varios diagnósticos, tratamientos, medicamentos y admisiones.
+
+3.  **Denormalización de la dimensión Admisión.** Se rediseñó esta dimensión ya que en la anterior tarea se le añadió el nivel de **Ruta**, pero el atributo constaba de muchas subdivisiones (hasta 7) y se consideró una mejor opción denormalizarla para que en las futuras consultas no se dependiera de tantos *JOINS*. Además, como especificamos en el siguiente punto, se troceó este atributo.
+
+4.  **Descomposición de atributos compuestos.** Se procedió desgranar aquellos atributos que contenían información con distinta jerarquía separada por \|, entre ellos **diagnosis**, **ruta** y **tratamiento**. Por ejemplo, un valor de la variable diagnosis de la tabla Diagnosis era: *pulmonary\|post thoracic surgery\|s/p thoracotomy\|lobectomy*.
+
+5.  **Adición de atributos de hecho relacionados con respiratorio.** Se añadieron nuevos atributos como **ventilado, duraciónVentilación, numEpVent, frecRespiratoriaMax** y **frecRespiratoriaMin**.
+
+-   ventilado (0/1): si existe cualquier ventStartOffset.
+-   duracionVentilacion: la duración de la ventilación si la hubo. SUM((ventEndOffset - ventStartOffset)/60.0)
+-   numEpVent: número de episodios de ventilación. COUNT(\*) de pares start–end.
+-   frecRespiratoriaMax/Min: valores máximos y mínimos de la respiración del paciente. MAX(respiration), MIN(respiration).
+
+6.  **Nuevo nivel Tamaño para la dimensión Hospital**. Se le añadió este nivel para denormalizar el atributo número de camas, ya que había cuatro valores posibles: \<100, 100-250, 250-499 y \>=500.
+
+### Modelo conceptual final
+
+![Modelo Conceptual Final](imagenes/modeloConceptual.png)
+
+### Modelo relacional final
+
+![Modelo Relacional Final](imagenes/modeloRelacional.png)
+
+## Creación de la base derivada
+
+Los **Ingresos UCI** añadidos a nuestro almacén están filtrados por **problemas respiratorios**, así que para facilitar el proceso de ETL y no depender de hacer consultas SQL continuamente, se extrajo una base de datos reducida de *eICU Collaborative Research Database* con las tablas y valores que necesitamos para rellenar nuestro almacén.
+
+La restricción utilizada fue aquellos pacientes con un valor de **ICD9Code en Diagnosis** comprendido **entre 460 y 519**, ya que este es el rango que se relaciona con enfermedades respiratorias. Además, se seleccionó aquellos diagnósticos que se indicasen con **Prioridad Primaria**.
+
+Se restauró la base de *eICU Collaborative Research Database* y se renombró como UCIbase. Después se ejecutó el siguiente script de SQL para obtener nuestra base de interés:
+
+``` sql
+USE master;
+GO
+
+DROP DATABASE IF EXISTS UCIreducida;
+
+CREATE DATABASE UCIreducida;
+GO
+
+USE UCIreducida;
+GO
+
+IF OBJECT_ID('dbo.CohorteRespiratoria','U') IS NOT NULL
+    DROP TABLE dbo.CohorteRespiratoria;
+GO
+
+WITH CleanedDiagnosis AS (
+    SELECT 
+        d.patientUnitStayID,
+        -- Extrae la parte ICD-9 antes de la coma
+        LTRIM(RTRIM(
+            CASE 
+                WHEN CHARINDEX(',', d.ICD9Code) > 0 
+                    THEN SUBSTRING(d.ICD9Code, 1, CHARINDEX(',', d.ICD9Code) - 1)
+                ELSE d.ICD9Code
+            END
+        )) AS Extracted_Code_Varchar
+    FROM UCIbase.dbo.Diagnosis d
+    WHERE UPPER(LTRIM(RTRIM(d.DiagnosisPriority))) = 'PRIMARY'
+),
+ConvertedDiagnosis AS (
+    SELECT
+        cd.patientUnitStayID,
+        -- Parte entera del ICD-9 (antes del punto)
+        TRY_CONVERT(int,
+            CASE 
+                WHEN CHARINDEX('.', cd.Extracted_Code_Varchar) > 0
+                    THEN LEFT(cd.Extracted_Code_Varchar, CHARINDEX('.', cd.Extracted_Code_Varchar) - 1)
+                ELSE cd.Extracted_Code_Varchar
+            END
+        ) AS Extracted_Numeric_ICD9_Code
+    FROM CleanedDiagnosis cd
+)
+-- Crear la tabla final con stays que cumplen el rango respiratorio
+SELECT DISTINCT
+    patientUnitStayID
+INTO dbo.CohorteRespiratoria
+FROM ConvertedDiagnosis
+WHERE Extracted_Numeric_ICD9_Code BETWEEN 460 AND 519;
+GO
+
+-- Verifica cuántos stays tienes
+SELECT COUNT(*) AS TotalStays FROM dbo.CohorteRespiratoria;
+
+-- Crear tabla Patient sin datos
+SELECT * INTO dbo.Patient
+FROM UCIbase.dbo.Patient
+WHERE 1 = 2;
+
+SELECT * INTO dbo.Diagnosis
+FROM UCIbase.dbo.Diagnosis
+WHERE 1 = 2;
+
+SELECT * INTO dbo.AdmissionDx
+FROM UCIbase.dbo.AdmissionDx
+WHERE 1 = 2;
+
+SELECT * INTO dbo.Medication
+FROM UCIbase.dbo.Medication
+WHERE 1 = 2;
+
+SELECT * INTO dbo.Treatment
+FROM UCIbase.dbo.Treatment
+WHERE 1 = 2;
+
+SELECT * INTO dbo.RespiratoryCare
+FROM UCIbase.dbo.RespiratoryCare
+WHERE 1 = 2;
+
+SELECT * INTO dbo.Hospital
+FROM UCIbase.dbo.Hospital
+WHERE 1 = 2;
+
+SELECT * INTO dbo.ApachePatientResult
+FROM UCIbase.dbo.ApachePatientResult
+WHERE 1 = 2;
+
+SELECT * INTO dbo.VitalPeriodic
+FROM UCIbase.dbo.VitalPeriodic
+WHERE 1 = 2;
+
+
+INSERT INTO dbo.Patient
+SELECT *
+FROM UCIbase.dbo.Patient p
+WHERE p.patientUnitStayID IN (SELECT patientUnitStayID FROM dbo.CohorteRespiratoria);
+
+INSERT INTO dbo.Diagnosis
+SELECT *
+FROM UCIbase.dbo.Diagnosis d
+WHERE d.patientUnitStayID IN (SELECT patientUnitStayID FROM dbo.CohorteRespiratoria);
+
+INSERT INTO dbo.AdmissionDx
+SELECT *
+FROM UCIbase.dbo.AdmissionDx a
+WHERE a.patientUnitStayID IN (SELECT patientUnitStayID FROM dbo.CohorteRespiratoria);
+
+INSERT INTO dbo.Medication
+SELECT *
+FROM UCIbase.dbo.Medication m
+WHERE m.patientUnitStayID IN (SELECT patientUnitStayID FROM dbo.CohorteRespiratoria);
+
+INSERT INTO dbo.Treatment
+SELECT *
+FROM UCIbase.dbo.Treatment t
+WHERE t.patientUnitStayID IN (SELECT patientUnitStayID FROM dbo.CohorteRespiratoria);
+
+INSERT INTO dbo.RespiratoryCare
+SELECT *
+FROM UCIbase.dbo.RespiratoryCare r
+WHERE r.patientUnitStayID IN (SELECT patientUnitStayID FROM dbo.CohorteRespiratoria);
+
+INSERT INTO dbo.Hospital
+SELECT DISTINCT h.*
+FROM UCIbase.dbo.Hospital h
+JOIN UCIbase.dbo.Patient p ON p.hospitalID = h.hospitalID
+WHERE p.patientUnitStayID IN (SELECT patientUnitStayID FROM dbo.CohorteRespiratoria);
+
+INSERT INTO dbo.ApachePatientResult
+SELECT *
+FROM UCIbase.dbo.ApachePatientResult a
+WHERE a.patientUnitStayID IN (SELECT patientUnitStayID FROM dbo.CohorteRespiratoria);
+
+INSERT INTO dbo.VitalPeriodic
+SELECT *
+FROM UCIbase.dbo.VitalPeriodic v
+WHERE v.patientUnitStayID IN (SELECT patientUnitStayID FROM dbo.CohorteRespiratoria);
+
+SELECT 
+    (SELECT COUNT(*) FROM dbo.Patient) AS nPatient,
+    (SELECT COUNT(*) FROM dbo.Diagnosis) AS nDiagnosis,
+    (SELECT COUNT(*) FROM dbo.AdmissionDx) AS nAdmission,
+    (SELECT COUNT(*) FROM dbo.Medication) AS nMedication,
+    (SELECT COUNT(*) FROM dbo.Treatment) AS nTreatment,
+    (SELECT COUNT(*) FROM dbo.RespiratoryCare) AS nRespCare,
+    (SELECT COUNT(*) FROM dbo.Hospital) AS nHospital,
+    (SELECT COUNT(*) FROM dbo.ApachePatientResult) AS nApache,
+    (SELECT COUNT(*) FROM dbo.VitalPeriodic) AS nVital;
+```
+
+## Realización del ETL
+
+En la imagen se puede ver la carga completa de todas las tablas: ![Flujo de control del ETL](imagenes/ETL_UCI.png)
+
+### 1. **Borrar Almacen UCI**
+
+La primera actividad del proceso ETL es "Borrar Almacen UCI", que tiene el propósito de vaciar totalmente el Data Warehouse antes de cada ejecución. Así, se previenen inconsistencias o duplicados al volver a cargar todas las dimensiones y tablas de hechos. Esta limpieza se realiza a través de una tarea "Ejecutar SQL", que está configurada para invocar el procedimiento almacenado dbo.Borrar, como se aprecia en la figura correspondiente.
+
+El procedimiento almacenado, que se creó antes en SQL Server Management Studio, tiene como objetivo borrar de manera segura el contenido de todas las tablas del almacén. Para ello, empieza por eliminar temporalmente las restricciones de claves foráneas, lo que es esencial en un contexto con tantas dependencias entre hechos y dimensiones. Esto posibilita eliminar la información de cualquier tabla sin provocar errores a causa de las relaciones referenciales.
+
+Cuando se desactivan las restricciones, el proceso suprime los registros de todas las tablas usando sentencias DELETE. Las claves foráneas se reactivan después de finalizar el borrado para restablecer la integridad referencial. Con este procedimiento, el almacén queda totalmente limpio y listo para realizar una nueva carga completa, asegurando de esta manera un ETL sin duplicados y estable.
+
+En la captura de pantalla se muestra la configuración de la tarea Borrar Almacén UCI, en la que se detallan el SQLStatement y la opción IsQueryStoredProcedure, que señala que un procedimiento almacenado será ejecutado. De igual modo, más adelante se presenta el contenido íntegro del script Borrar, lo que posibilita observar en detalle la manera en que se manejan la eliminación de tablas, la desactivación de restricciones y la restauración final de la integridad referencial.
+
+![Ventana de información de Borrar Almacen UCI](Borrar%20Almacen%20UCI.png)
+
+``` sql
+USE [AlmacenUCI] GO
+
+SET ANSI_NULLS ON 
+GO 
+SET QUOTED_IDENTIFIER ON 
+GO
+
+ALTER PROCEDURE [dbo].[Borrar] 
+AS 
+BEGIN 
+
+    EXEC sp_MSforeachtable "ALTER TABLE ? NOCHECK CONSTRAINT ALL"
+
+    delete from [dbo].[Diagnosis]
+    delete from [dbo].[Medicacion]
+    delete from [dbo].[Administracion]
+    delete from [dbo].[Admision]
+    delete from [dbo].[Categoria]
+    delete from [dbo].[Clasificacion]
+    delete from [dbo].[CuidadosRespiratorios]
+    delete from [dbo].[Etnia]
+    delete from [dbo].[Genero]
+    delete from [dbo].[Hospital]
+    delete from [dbo].[IngresoUCI]
+    delete from [dbo].[IngresoUCI_Admision]
+    delete from [dbo].[IngresoUCI_CuidadosRespiratorios]
+    delete from [dbo].[IngresoUCI_Diagnosis]
+    delete from [dbo].[IngresoUCI_Medicacion]
+    delete from [dbo].[IngresoUCI_Tratamiento]
+    delete from [dbo].[Paciente]
+    delete from [dbo].[Prioridad]
+    delete from [dbo].[Region]
+    delete from [dbo].[TamanoHospital]
+    delete from [dbo].[Tiempo]
+    delete from [dbo].[Tratamiento]
+    delete from [dbo].[ViaArea]
+    
+    EXEC sp_MSforeachtable "ALTER TABLE ? WITH CHECK CHECK CONSTRAINT ALL"
+
+END
+```
+
+Después de que se han eliminado las cargas anteriores, el almacén queda listo para comenzar con las operaciones reales de carga de datos. En esta etapa, es esencial prevenir una ejecución secuencial innecesaria, por lo que todos los flujos que tienen la capacidad de procesarse en paralelo se inician al mismo tiempo con el objetivo de optimizar la eficacia del ETL. Cuando se ha terminado el proceso BorrarAlmacenUCI de manera adecuada, los primeros ocho flujos de trabajo se ponen en marcha de inmediato. Estos flujos son parte de la etapa inicial del desarrollo del Data Warehouse y los explicaré a continuación con más detalle.
+
+### 2. **Carga de Niveles de Dimensión**
+
+#### 2.1 Carga de Género y Etnia
+
+Después de la etapa inicial de limpieza del almacén, una de las primeras actividades del ETL es la carga de dos dimensiones fundamentales del modelo: Etnia y Genero. Ambas se incorporan a un contenedor de secuencia porque constituyen procesos independientes, aunque conceptualmente vinculados, que se llevan a cabo secuencialmente en un mismo bloque para conservar una estructura lógica del paquete ETL.
+
+La carga de la dimensión Genero comienza con la extracción de los valores distintos presentes en la base de datos de origen UCIreducida. Para ello, se utiliza un origen ADO.NET configurado con un comando SQL muy simple:
+
+``` sql
+SELECT DISTINCT Gender FROM Patient
+```
+
+Así, se logra exclusivamente la lista de géneros registrados en los registros de pacientes, sin repeticiones. Una colección limitada de valores se transmite directamente al componente de destino utilizando un destino ADO NET, mediante la asignación de la columna "Gender" del origen a la columna "genero" del almacén de datos. La nueva base de datos generó automáticamente la clave idGenero. El flujo es simple y eficaz debido a que se trata de una dimensión muy pequeña (solamente dos valores en esta ocasión).
+
+![Carga Genero](Carga%20Genero.png)
+
+El proceso de carga de Etnia sigue el mismo patrón que el de Género, pero se ajusta a las características correspondientes. Una vez más, se realiza una consulta SQL en la tabla Patient a través de un origen ADO.NET:
+
+``` sql
+SELECT DISTINCT Ethnicity FROM Patient;
+```
+
+Esta instrucción permite la recuperación de todas las etnias que aparecen en los datos clínicos originales. El flujo envía el resultado a la ubicación Etnia en DW, donde se lleva a cabo un mapeo directo entre la columna de origen "Ethnicity" y la columna del almacén "etnia". La clave primaria (idEtnia) no se asigna en el flujo, como en la carga anterior, porque el Data Warehouse la produce automáticamente a través de su identidad configurada.
+
+![Carga Etnia](Carga%20Etnia.png)
+
+#### 2.2 Carga Prioridad y Clasificación
+
+La carga de las dimensiones Prioridad y Clasificación se agrupan en un solo contenedor de secuencia común dentro del paquete ETL, porque proceden de la misma tabla de origen (Diagnosis en la base de datos UCIreducida). Así, las tareas vinculadas con la información diagnóstica se agrupan de manera lógica, lo que permite conservar el diseño del paquete más claro y ordenado.
+
+En la Carga Prioridad se pretende poblar la dimensión que recoge los distintos niveles de prioridad de diagnóstico. Para ello se utiliza un origen ADO.NET sobre la base de datos UCIreducida ejecutando la siguiente consulta:
+
+``` sql
+SELECT DISTINCT DiagnosisPriority FROM Diagnosis
+```
+
+Con este comando, se obtienen solamente los valores que no son de prioridad, para evitar duplicados innecesarios. El resultado se manda directamente a ADO NET Prioridad en DW, donde la columna DiagnosisPriority se empareja con el atributo prioridad del Data Warehouse. Como la columna idPrioridad es una clave surrogate que se maneja como identidad en la tabla de destino, no se nutre desde el flujo. Este flujo carga tres filas, las cuales se corresponden con los tres niveles de importancia presentes en la información original.
+
+![Carga Prioridad](Carga%20Prioridad.png)
+
+En otra línea, la Carga Clasificación tiene la responsabilidad de completar la dimensión de códigos diagnósticos, que se fundamenta en el identificador ICD9Code. En esta situación, se establece el origen ADO.NET en modo "Tabla o vista", eligiendo "dbo"."Diagnosis" como tabla de entrada. Se mandan todas las filas requeridas al componente de conversión de datos a partir de ella, en el que se cambia el tipo de la columna ICD9Code al tipo DT_WSTR con una longitud de 50. Esto origina una nueva columna de salida llamada Copy of ICD9Code. Para que el formato del código diagnóstico coincida con la definición de la columna ICD9Code en la dimensión de destino, es preciso realizar esta conversión.
+
+Finalmente, el flujo se conecta con la clasificación ADO NET en DW. Copy of ICD9Code se relaciona con el atributo ICD9Code de la tabla de dimensión en las asignaciones de columnas, pero la clave idClasificacion se vuelve a crear automáticamente como identidad en el Data Warehouse. Este procedimiento carga aproximadamente 6.473 filas, que corresponden a los variados códigos ICD9 que aparecen en la tabla de diagnósticos de la UCI.
+
+![Carga Clasificacion](Carga%20Clasificacion.png)
+
+#### 2.3 Carga VíaAérea
+
+Para el nivel de VíaAérea perteneciente a la dimensión **Cuidados Respiratorios**, se ejecuta la siguiente consulta que toma el atributo **airwayType** y permite normalizar sus valores. Cabe recalcar que a las celdas NULL se les asignó la categoría de *DESCONOCIDA*, para que aquellos conjuntos de Cuidados Respiratorios que no tuvieran una vía aérea determinada se conservasen dentro del DW.
+
+``` sql
+SELECT DISTINCT
+    ISNULL(NULLIF(LTRIM(RTRIM(airwayType)), ''), 'DESCONOCIDA') AS airwayType
+FROM dbo.RespiratoryCare;
+```
+
+Se obtuvieron tres categorías diferentes *Oral ETT*, *Tracheostomy* y *No Artificial Airway*, sumándole la creada artificialmente como *DESCONOCIDA*. Después, se procedió a introducir los resultados en el almacén, en la variable **airwayType** de la tabla **VíaAerea**. Se omitió la asignación para el **idViaAerea** ya que al construir la estructura del almacén se especificó que fuera un identificador autoincrementado.
+
+![Carga ViaAerea](Carga%20ViaAerea.png)
+
+#### 2.4 Carga Categoria y Administración
+
+Para la carga normalizada de estos niveles paralelos dentro de la dimensión **Medicación**, se utilizó primero esta consulta para importar **Categoría**, asociada por el atributo *GTC* de la tabla **Medication** de la base de datos original.
+
+``` sql
+SELECT DISTINCT
+    TRY_CAST(GTC AS int) AS GTC
+FROM dbo.Medication
+WHERE TRY_CAST(GTC AS int) IS NOT NULL;
+```
+
+Obtuvimos 41 filas diferentes, posteriormente en nuestra tabla de destino del DW se asoció *GTCCode* con *GTC* y se dejó que el *idCategoria* se asignase con valores autoincrementados.
+
+![Carga Categoria](Carga%20Categoria.png)
+
+Para **Administración**, ya que un medicamento puede administrarse por distintas técnicas, se normalizó la variable *RouteAdmin* de la BD mediante el siguiente comando SQL y se renombró a *viaAdministracion*:
+
+``` sql
+SELECT DISTINCT
+    LTRIM(RTRIM(RouteAdmin)) AS viaAdministracion
+FROM dbo.Medication
+WHERE RouteAdmin IS NOT NULL
+  AND LTRIM(RTRIM(RouteAdmin)) <> '';
+```
+
+Obtuvimos 164 filas diferentes y se realizó una conversión de datos, se mantuvo el tipo cadena Unicode \[DT_WSTR\] y se redujo la longitud a 50. Tras esto, el flujo finaliza insertando la información en la tabla **Administración** del almacén, asociando viaAdministracion con la copia transformada y manteniendo **idAdministración** como autoincrementado.
+
+![Carga Administracion](Carga%20Administracion.png) \#### 2.5 Carga Región y Tamaño
+
+La importación normalizada de regiones y tamaño asociados a hospitales, se desarrolló de la siguiente forma: en el caso de **Carga Región** el flujo de datos es muy sencillo, un origen ADO NET que accede a la base de datos para consultar las distintas regiones presentes en la tabla **Hospital**, una conversión de datos a cadena Unicode de longitud 50 y un destino ADO NET, vinculado a la tabla Region del Data Warehouse. En este flujo, el atributo *region* se utiliza para almacenar el nombre de la región, mientras que el atributo *regionID* es una clave autogenerada, por lo que no es necesario rellenarla manualmente. En total se distinguen 5 regiones.
+
+``` sql
+SELECT DISTINCT Region FROM Hospital
+```
+
+![Carga Region](Carga%20Region.png)
+
+Para **Carga Tamaño**, se escogió el atributo *NumBedsCategory* que describía el rango de camas que tenía la unidad UCI en cuestión. Se normalizaron los valores y se importaron a nuestra tabla **Tamaño** del DW. En concreto había 5 intervalos distintos: NULL, \<100, 100-249, 250-499, \>=500.
+
+``` sql
+Select Distinct NumBedsCategory FROM Hospital;
+```
+
+![Carga Tamaño](Carga%20TamanoHospital.png)
+
+### 3. **Carga de Dimensiones**
+
+#### 3.1 Carga Admision
+
+En la Carga Admisión construimos la dimensión Admision a partir de la tabla admissiondx de la base de datos origen UCIreducida. Para ello definimos un origen ADO.NET con modo de acceso Comando SQL, donde ejecutamos la consulta mostrada. Esta consulta selecciona el identificador de la admisión (admissiondxid), la ruta completa admitdxpath y el nombre del diagnóstico admitdxname, y además descompone el campo admitdxpath, que viene como una cadena con niveles separados por el carácter \|, en hasta siete niveles jerárquicos (rutaAdmisionN1…rutaAdmisionN7). Para localizar cada tramo se utiliza un CROSS APPLY que calcula las posiciones de los separadores (p1…p6 mediante CHARINDEX), y posteriormente varios CASE WHEN y funciones LEFT/SUBSTRING que extraen cada segmento entre separadores, controlando con ISNULL y NULLIF los casos en los que la ruta tiene menos niveles.
+
+``` sql
+SELECT
+    a.admissiondxid,
+    a.admitdxpath,
+    a.admitdxname,
+
+    -- Calculamos cada nivel entre separadores
+    CASE WHEN p1 > 0
+         THEN LEFT(a.admitdxpath, p1 - 1)
+    END AS rutaAdmisionN1,
+
+    CASE WHEN p1 > 0
+         THEN SUBSTRING(a.admitdxpath, p1 + 1, ISNULL(NULLIF(p2,0), LEN(a.admitdxpath)+1) - (p1 + 1))
+    END AS rutaAdmisionN2,
+
+    CASE WHEN p2 > 0
+         THEN SUBSTRING(a.admitdxpath, p2 + 1, ISNULL(NULLIF(p3,0), LEN(a.admitdxpath)+1) - (p2 + 1))
+    END AS rutaAdmisionN3,
+
+    CASE WHEN p3 > 0
+         THEN SUBSTRING(a.admitdxpath, p3 + 1, ISNULL(NULLIF(p4,0), LEN(a.admitdxpath)+1) - (p3 + 1))
+    END AS rutaAdmisionN4,
+
+    CASE WHEN p4 > 0
+         THEN SUBSTRING(a.admitdxpath, p4 + 1, ISNULL(NULLIF(p5,0), LEN(a.admitdxpath)+1) - (p4 + 1))
+    END AS rutaAdmisionN5,
+
+    -- N6: entre 5º y 6º separador
+    CASE WHEN p5 > 0
+         THEN SUBSTRING(a.admitdxpath, p5 + 1, ISNULL(NULLIF(p6,0), LEN(a.admitdxpath)+1) - (p5 + 1))
+    END AS rutaAdmisionN6,
+
+    -- N7: después del 6º separador hasta el final
+    CASE WHEN p6 > 0
+         THEN SUBSTRING(a.admitdxpath, p6 + 1, LEN(a.admitdxpath))
+    END AS rutaAdmisionN7
+
+FROM admissiondx AS a
+CROSS APPLY (
+    SELECT
+        CHARINDEX('|', a.admitdxpath)                                                   AS p1,
+        CHARINDEX('|', a.admitdxpath, CHARINDEX('|', a.admitdxpath) + 1)               AS p2,
+        CHARINDEX('|', a.admitdxpath, CHARINDEX('|', a.admitdxpath, CHARINDEX('|', a.admitdxpath) + 1) + 1) AS p3,
+        CHARINDEX('|', a.admitdxpath, CHARINDEX('|', a.admitdxpath, CHARINDEX('|', a.admitdxpath, CHARINDEX('|', a.admitdxpath) + 1) + 1) + 1) AS p4,
+        CHARINDEX('|', a.admitdxpath, CHARINDEX('|', a.admitdxpath, CHARINDEX('|', a.admitdxpath, CHARINDEX('|', a.admitdxpath, CHARINDEX('|', a.admitdxpath) + 1) + 1) + 1) + 1) AS p5,
+        CHARINDEX('|', a.admitdxpath, CHARINDEX('|', a.admitdxpath, CHARINDEX('|', a.admitdxpath, CHARINDEX('|', a.admitdxpath, CHARINDEX('|', a.admitdxpath, CHARINDEX('|', a.admitdxpath) + 1) + 1) + 1) + 1) + 1) AS p6
+) AS pos;
+```
+
+El producto de esta consulta nutre un proceso de transformación de datos. En ella, transformamos los campos derivados de rutaAdmisionN1...rutaAdmisionN7 y el admitdxname en cadenas Unicode \[DT_WSTR\] con una longitud de 200. Este paso asegura que la estructura del almacén de datos sea compatible, ya que estos atributos están establecidos como nvarchar(200), y previene errores o advertencias por truncamientos potenciales al introducir textos más extensos o con caracteres Unicode.
+
+Para concluir, el flujo se dirige a la tabla Admision del DW, utilizando ADO.NET. En el proceso de mapeo de columnas, asignamos a la columna clave admisionID el campo admissiondxid; a sus respectivas columnas, rutaAdmisionN1…rutaAdmisionN7, cada copia convertida: Copy of rutaAdmisionN1…Copy of rutaAdmisionN7; y a diagnosticoAdmision, finalmente, Copy of admitdxname. Así, las 825 filas que se leyeron de la tabla fuente se introducen directamente en la dimensión de admisión del almacén. Se mantiene tanto el identificador original como la descomposición jerárquica de la ruta diagnóstica.
+
+![Carga Admision](Carga%20Admision.png)
+
+#### 3.2 Carga Tiempo
+
+Para la Carga Tiempo se crea una dimensión temporal denormalizada a partir de la información de ingresos y altas disponible en la tabla Patient de la base de datos operacional UCIreducida. En el origen ADO.NET se utiliza el modo de acceso Comando SQL y se define una consulta que, en primer lugar, construye un CTE llamado TiempoBase. En este CTE se seleccionan de forma DISTINCT las combinaciones de hora de admisión (hospitalAdmitTime24), hora de alta (hospitalDischargeTime24) y año de alta (hospitalDischargeYear). Las horas se convierten explícitamente al tipo time(0) mediante TRY_CONVERT, y se filtran sólo aquellos registros cuyo año de alta no es nulo, garantizando así que las filas de Tiempo tengan siempre una fecha de referencia válida.
+
+A partir de ese conjunto base se genera la tabla final de tiempos. En la cláusula principal SELECT se asigna un identificador artificial tiempoID usando ROW_NUMBER() OVER (ORDER BY anioAlta, horaAdmision, horaAlta), de forma que los valores quedan ordenados cronológicamente por año de alta y, dentro de cada año, por hora de admisión y hora de alta. Además de ese identificador se proyectan las tres columnas lógicas de la dimensión (horaAdmision, horaAlta y anioAlta), y se descartan aquellas filas en las que la hora de alta sea nula, ya que no aportarían información temporal completa para el análisis de estancias.
+
+``` sql
+WITH TiempoBase AS (
+    SELECT DISTINCT
+        TRY_CONVERT(time(0), hospitalAdmitTime24)      AS horaAdmision,
+        TRY_CONVERT(time(0), hospitalDischargeTime24)  AS horaAlta,
+        hospitalDischargeYear                          AS anioAlta
+    FROM dbo.Patient
+    WHERE hospitalDischargeYear IS NOT NULL
+)
+SELECT
+    CAST(ROW_NUMBER() OVER (ORDER BY anioAlta, horaAdmision, horaAlta) AS int) AS tiempoID,
+    horaAdmision,
+    horaAlta,
+    anioAlta
+FROM TiempoBase
+WHERE horaAlta IS NOT NULL;
+```
+
+El resultado de la consulta se envía directamente al destino Tiempo en DW, donde se insertan los registros en la tabla de la dimensión Tiempo del almacén AlmacenUCI. En el editor de asignación de columnas se mapean uno a uno los campos del origen (tiempoID, horaAdmision, horaAlta, anioAlta) con sus correspondientes de la tabla de destino.
+
+![Carga Tiempo](Carga%20Tiempo.png)
+
+#### 3.3 Carga Tratamiento
+
+En la Carga Tratamiento construimos dicha dimensión a partir de la tabla treatment de la base de datos origen UCIreducida. Para ello definimos un origen ADO.NET con modo de acceso Comando SQL, donde ejecutamos la consulta mostrada. Esta consulta selecciona el identificador del tratamiento (treatmentid) y descompone el atributo treatment, que viene como una cadena con niveles separados por el carácter \|, en hasta cuatro niveles jerárquicos (tratamientoN1…tratamientoN4). Para localizar cada tramo se utiliza un CROSS APPLY que calcula las posiciones de los separadores (mediante CHARINDEX), y posteriormente varios CASE WHEN y funciones LEFT/SUBSTRING que extraen cada segmento entre separadores, controlando con ISNULL y NULLIF los casos en los que la ruta tiene menos niveles.
+
+``` sql
+SELECT
+    t.treatmentID,
+
+    -- N1
+    CASE 
+        WHEN CHARINDEX('|', t.treatmentString) > 0
+            THEN LEFT(t.treatmentString, CHARINDEX('|', t.treatmentString) - 1)
+        ELSE t.treatmentString
+    END AS tratamientoN1,
+
+    -- N2
+    CASE 
+        WHEN CHARINDEX('|', t.treatmentString) = 0
+            THEN NULL
+        WHEN CHARINDEX('|', t.treatmentString, CHARINDEX('|', t.treatmentString) + 1) = 0
+            THEN SUBSTRING(
+                    t.treatmentString,
+                    CHARINDEX('|', t.treatmentString) + 1,
+                    LEN(t.treatmentString)
+                 )
+        ELSE SUBSTRING(
+                t.treatmentString,
+                CHARINDEX('|', t.treatmentString) + 1,
+                CHARINDEX('|', t.treatmentString, CHARINDEX('|', t.treatmentString) + 1)
+                    - CHARINDEX('|', t.treatmentString) - 1
+             )
+    END AS tratamientoN2,
+
+    -- N3
+    CASE 
+        WHEN CHARINDEX('|', t.treatmentString, CHARINDEX('|', t.treatmentString) + 1) = 0
+            THEN NULL
+        WHEN CHARINDEX('|', t.treatmentString,
+                       CHARINDEX('|', t.treatmentString,
+                                 CHARINDEX('|', t.treatmentString) + 1) + 1) = 0
+            THEN SUBSTRING(
+                    t.treatmentString,
+                    CHARINDEX('|', t.treatmentString, CHARINDEX('|', t.treatmentString) + 1) + 1,
+                    LEN(t.treatmentString)
+                 )
+        ELSE SUBSTRING(
+                t.treatmentString,
+                CHARINDEX('|', t.treatmentString,
+                          CHARINDEX('|', t.treatmentString) + 1) + 1,
+                CHARINDEX('|', t.treatmentString,
+                          CHARINDEX('|', t.treatmentString,
+                                    CHARINDEX('|', t.treatmentString) + 1) + 1)
+                    - (CHARINDEX('|', t.treatmentString,
+                                 CHARINDEX('|', t.treatmentString) + 1) + 1)
+             )
+    END AS tratamientoN3,
+
+    -- N4
+    CASE 
+        WHEN CHARINDEX('|', t.treatmentString,
+                       CHARINDEX('|', t.treatmentString,
+                                 CHARINDEX('|', t.treatmentString) + 1) + 1) = 0
+            THEN NULL
+        ELSE SUBSTRING(
+                t.treatmentString,
+                CHARINDEX('|', t.treatmentString,
+                          CHARINDEX('|', t.treatmentString,
+                                    CHARINDEX('|', t.treatmentString) + 1) + 1) + 1,
+                LEN(t.treatmentString)
+             )
+    END AS tratamientoN4
+
+FROM dbo.Treatment AS t;
+```
+
+Tras esta consulta se realiza una conversión de datos. En ella, transformamos los campos derivados de tratamientoN1... tratamientoN4 en cadenas Unicode \[DT_WSTR\] con una longitud de 150. Este paso asegura que la estructura del almacén de datos sea compatible, ya que estos atributos están establecidos como nvarchar(150), y previene errores o advertencias por truncamientos potenciales al introducir textos más extensos o con caracteres Unicode.
+
+Para concluir, el flujo se dirige a la tabla Tratamiento del DW, utilizando ADO.NET. En el proceso de mapeo de columnas, asignamos a la columna clave tratamientoID el campo treatmentID, además de los tratamientoN1-N4 a sus respectivas con las copia de tratamientoN1-N4. Así, las 7801 filas que se leyeron de la tabla fuente se introducen directamente en la dimensión de admisión del almacén. Se mantiene tanto el identificador original como la descomposición jerárquica del tratamiento asignado al paciente.
+
+![Carga Tratamiento](Carga%20Tratamiento.png)
+
+#### 3.4 Carga Paciente por completar
+
+``` sql
+WITH Pac AS (
+    SELECT
+        uniquePID,
+        CASE 
+            WHEN Age LIKE '> 89%' THEN 90
+            WHEN TRY_CAST(Age AS int) IS NOT NULL 
+                 THEN TRY_CAST(Age AS int)
+            ELSE NULL
+        END AS AgeClean,
+        LTRIM(RTRIM(Ethnicity)) AS EthClean,
+        LTRIM(RTRIM(Gender))    AS GenClean
+    FROM dbo.Patient
+)
+SELECT
+    uniquePID,
+    MAX(AgeClean)  AS Age,
+    MAX(EthClean)  AS Ethnicity,
+    MAX(GenClean)  AS Gender
+FROM Pac
+GROUP BY uniquePID;
+```
+
+![Carga Paciente](Carga%20Paciente.png)
+
+#### 3.5 Carga Diagnosis por completar
+
+``` sql
+SELECT
+    d.diagnosisID,
+
+    -- N1
+    LEFT(d.diagnosisString,
+         NULLIF(CHARINDEX('|', d.diagnosisString), 0) - 1
+    ) AS diagnosisN1,
+
+    -- N2
+    CASE 
+        WHEN CHARINDEX('|', d.diagnosisString) > 0 THEN
+            SUBSTRING(
+                d.diagnosisString,
+                CHARINDEX('|', d.diagnosisString) + 1,
+                CASE 
+                    WHEN CHARINDEX('|', d.diagnosisString, CHARINDEX('|', d.diagnosisString) + 1) > 0
+                    THEN CHARINDEX('|', d.diagnosisString, CHARINDEX('|', d.diagnosisString) + 1) 
+                         - (CHARINDEX('|', d.diagnosisString) + 1)
+                    ELSE LEN(d.diagnosisString)
+                END
+            )
+    END AS diagnosisN2,
+
+    -- N3
+    CASE 
+        WHEN CHARINDEX('|', d.diagnosisString, CHARINDEX('|', d.diagnosisString) + 1) > 0 THEN
+            SUBSTRING(
+                d.diagnosisString,
+                CHARINDEX('|', d.diagnosisString, CHARINDEX('|', d.diagnosisString) + 1) + 1,
+                CASE
+                    WHEN CHARINDEX('|', d.diagnosisString, 
+                                  CHARINDEX('|', d.diagnosisString, CHARINDEX('|', d.diagnosisString) + 1) + 1) > 0
+                    THEN CHARINDEX('|', d.diagnosisString,
+                                  CHARINDEX('|', d.diagnosisString, CHARINDEX('|', d.diagnosisString) + 1) + 1)
+                         - (CHARINDEX('|', d.diagnosisString, CHARINDEX('|', d.diagnosisString) + 1) + 1)
+                    ELSE LEN(d.diagnosisString)
+                END
+            )
+    END AS diagnosisN3,
+
+    -- N4
+    CASE 
+        WHEN CHARINDEX('|', d.diagnosisString,
+                       CHARINDEX('|', d.diagnosisString,
+                                 CHARINDEX('|', d.diagnosisString) + 1) + 1) > 0 THEN
+            SUBSTRING(
+                d.diagnosisString,
+                CHARINDEX('|', d.diagnosisString,
+                          CHARINDEX('|', d.diagnosisString,
+                                    CHARINDEX('|', d.diagnosisString) + 1) + 1) + 1,
+                LEN(d.diagnosisString)
+            )
+    END AS diagnosisN4,
+
+    LTRIM(RTRIM(d.diagnosisPriority)) AS prioridadTexto,
+    LTRIM(RTRIM(d.ICD9Code))          AS ICD9CodeTexto
+
+FROM dbo.Diagnosis d;
+```
+
+![Carga Diagnosis](Carga%20Diagnosis.png)
+
+12. **Carga Cuidados Respiratorios** por completar
+
+``` sql
+SELECT
+    r.respCareID,
+    LEFT(LTRIM(RTRIM(r.airwaySize)), 50)      AS airwaySize,
+    LEFT(LTRIM(RTRIM(r.airwayPosition)), 50)  AS airwayPosition,
+    TRY_CAST(r.cuffPressure AS float)         AS cuffPressure,
+    ISNULL(NULLIF(LTRIM(RTRIM(r.airwayType)), ''), 'DESCONOCIDA') AS airwayType
+FROM dbo.RespiratoryCare AS r;
+```
+
+![Carga Cuidados Respiratorios](Carga%20CuidadosRespiratorios.png)
+
+#### 3.6 Carga Medicacion por completar
+
+``` sql
+SELECT
+    m.medicationID,
+    LTRIM(RTRIM(m.DrugName)) AS nombre,
+    TRY_CAST(
+        LEFT(m.Dosage, PATINDEX('%[^0-9.]%', m.Dosage + 'X') - 1)
+        AS float
+    ) AS dosis,
+
+    LTRIM(RTRIM(m.Frequency)) AS frecuencia,  -- AHORA TEXTO
+
+    TRY_CAST(m.GTC AS int) AS GTC,
+    LTRIM(RTRIM(m.RouteAdmin)) AS viaAdministracion
+FROM dbo.Medication AS m;
+```
+
+![Carga Medicacion](Carga%20Medicacion.png)
+
+#### 3.7 Carga Hospital por completar
+
+No se realizó ninguna consulta, se seleccionó directamente la tabla **Hospital**.
+
+![Carga Hospital](Carga%20Hospital.png)
+
+### 4. **Carga del Hecho: Ingreso UCI** por completar
+
+``` sql
+WITH ApacheFinal AS (
+    SELECT
+        apr.patientUnitStayID,
+        /* -1 -> NULL y tipado a FLOAT */
+        CASE WHEN apr.apacheScore = -1 THEN NULL ELSE apr.apacheScore END AS apacheScore,
+apr.predictedICUMortality as mortalidadProbabilidad,
+        ROW_NUMBER() OVER (
+            PARTITION BY apr.patientUnitStayID
+            ORDER BY apr.apachePatientResultsID DESC
+        ) AS rn
+    FROM apachePatientResult apr
+),
+Ventilacion AS (
+    SELECT 
+        rc.patientUnitStayID,
+        SUM(CASE
+                WHEN rc.ventStartOffset IS NOT NULL AND rc.ventEndOffset IS NOT NULL
+                THEN (rc.ventEndOffset - rc.ventStartOffset)
+                ELSE 0
+            END) AS duracionVentilacion,
+        COUNT(CASE WHEN rc.ventStartOffset IS NOT NULL THEN 1 END) AS numEpVent,
+        CASE WHEN COUNT(CASE WHEN rc.ventStartOffset IS NOT NULL THEN 1 END) > 0 THEN 1 ELSE 0 END AS ventilado
+    FROM respiratoryCare rc
+    GROUP BY rc.patientUnitStayID
+),
+Respiracion AS (
+    SELECT 
+        vp.patientUnitStayID,
+        MAX(CAST(vp.respiration AS FLOAT)) AS frecRespiratoriaMax,
+        MIN(CAST(vp.respiration AS FLOAT)) AS frecRespiratoriaMin
+    FROM vitalPeriodic vp
+    WHERE vp.respiration IS NOT NULL
+    GROUP BY vp.patientUnitStayID
+)
+SELECT 
+    p.patientUnitStayID,
+    p.patientHealthSystemStayID,
+
+    -- Duración admisión hospital -> UCI (mins)
+    ABS(p.hospitalAdmitOffset) AS duracionAdmision,
+
+    -- Duración en UCI (mins). COALESCE por si viniera NULL.
+    COALESCE(p.unitDischargeOffset, 0) AS duracionUCI,
+
+    -- APACHE (float) y prob. de mortalidad (0–1)
+    af.apacheScore,
+    af.mortalidadProbabilidad,
+    /* Opcional: en % */
+    /* CASE WHEN af.mortalidadProbabilidad IS NULL THEN NULL
+           ELSE af.mortalidadProbabilidad * 100 END AS mortalidadPorcentaje, */
+
+    -- Estado al alta UCI
+    p.unitDischargeStatus AS estadoAlta,
+
+    -- Ventilación
+    COALESCE(v.ventilado, 0)            AS ventilado,
+    COALESCE(v.duracionVentilacion, 0)  AS duracionVentilacion,
+    COALESCE(v.numEpVent, 0)            AS numEpVent,
+
+    -- Frecuencia respiratoria (medición real)
+    r.frecRespiratoriaMax,
+    r.frecRespiratoriaMin
+
+FROM patient p
+LEFT JOIN ApacheFinal af
+       ON af.patientUnitStayID = p.patientUnitStayID
+      AND af.rn = 1
+LEFT JOIN Ventilacion v
+       ON v.patientUnitStayID = p.patientUnitStayID
+LEFT JOIN Respiracion r
+       ON r.patientUnitStayID = p.patientUnitStayID;
+```
+
+![Carga IngresoUCI](Carga%20IngresoUCI.png)
+
+### 5. **Carga de las Relaciones Muchos a Muchos N:M**
+
+Cuando se implementa un modelo dimensional, especialmente en un esquema estrella o copo de nieve, las relaciones de muchos a muchos (N:M) entre una tabla de hechos y una tabla de dimensión no se pueden establecer directamente. En su lugar, se requiere de una tabla auxiliar, conocida como **tabla de Relación, tabla Puente o tabla de Asignación**.
+
+La correcta secuencia de carga (ETL) es fundamental para mantener la integridad de los datos. Por ello, primero se poblan las tablas base, aquellas que contienen el origen de las claves primarias (PKs). Una vez realizado, el flujo se dirige a las tablas de Relación. Finalmente, con la herramienta *origen ADO NET* con el acceso de datos mediante Comando SQL se procede a referenciar las PKs del hecho y de la dimensión dada del almacén. Mediante un *destino ADO NET*, se introducen estos datos en la tabla Hecho_Dimensión.
+
+A continuación, se especificarán las consultas SQL para cada relación N:M junto a una imagen de la ejecución completada con éxito.
+
+#### 1. Carga Ingreso UCI - Diagnosis
+
+``` sql
+SELECT DISTINCT
+    i.patientUnitStayID          AS IngresoUCI_patientUnitStayID,
+    i.patientHealthSystemStayID  AS IngresoUCI_patientHealthSystemStayID,
+    d.diagnosisID                AS Diagnosis_diagnosisID
+FROM AlmacenUCI.dbo.IngresoUCI AS i
+JOIN UCIreducida.dbo.Diagnosis AS d
+    ON d.patientUnitStayID = i.patientUnitStayID;
+```
+
+![Carga Ingreso UCI Diagnosis](Carga%20IngresoUCI_Diagnosis.png)
+
+#### 2. Carga Ingreso UCI - Admision
+
+``` sql
+SELECT DISTINCT
+    i.patientUnitStayID         AS IngresoUCI_patientUnitStayID,
+    i.patientHealthSystemStayID AS IngresoUCI_patientHealthSystemStayID,
+    ad.AdmissionDxID                AS Admision_admisionID   
+FROM UCIreducida.dbo.AdmissionDx AS ad
+JOIN AlmacenUCI.dbo.IngresoUCI AS i
+      ON ad.patientUnitStayID = i.patientUnitStayID
+WHERE ad.AdmissionDxID IS NOT NULL;
+```
+
+![Carga Ingreso UCI Admision](Carga%20IngresoUCI_Admision.png)
+
+#### 3. Carga Ingreso UCI - Tratamiento
+
+``` sql
+SELECT DISTINCT
+    i.patientUnitStayID         AS IngresoUCI_patientUnitStayID,
+    i.patientHealthSystemStayID AS IngresoUCI_patientHealthSystemStayID,
+    t.treatmentID               AS Tratamiento_treatmentID
+FROM AlmacenUCI.dbo.IngresoUCI AS i
+JOIN UCIreducida.dbo.Treatment AS t
+    ON t.patientUnitStayID = i.patientUnitStayID
+WHERE t.treatmentID IS NOT NULL;
+```
+
+![Carga Ingreso UCI Tratamiento](Carga%20IngresoUCI_Tratamiento.png)
+
+#### 4. Carga Ingreso UCI - Cuidados Respiratorios
+
+``` sql
+SELECT DISTINCT
+    i.patientUnitStayID         AS IngresoUCI_patientUnitStayID,
+    i.patientHealthSystemStayID AS IngresoUCI_patientHealthSystemStayID,
+    rc.respCareID               AS CuidadosRespiratorios_respCareID
+FROM AlmacenUCI.dbo.IngresoUCI AS i
+JOIN UCIreducida.dbo.RespiratoryCare AS rc
+    ON rc.patientUnitStayID = i.patientUnitStayID
+WHERE rc.respCareID IS NOT NULL;
+```
+
+![Carga Ingreso UCI Cuidados Respiratorios](Carga%20IngresoUCI_CuidadosRespiratorios.png)
+
+#### 5. Carga Ingreso UCI - Medicacion
+
+``` sql
+SELECT DISTINCT
+    i.patientUnitStayID         AS IngresoUCI_patientUnitStayID,
+    i.patientHealthSystemStayID AS IngresoUCI_patientHealthSystemStayID,
+    m.medicationID              AS Medicacion_medicationID
+FROM AlmacenUCI.dbo.IngresoUCI AS i
+JOIN UCIreducida.dbo.Medication AS m
+    ON m.patientUnitStayID = i.patientUnitStayID
+WHERE m.medicationID IS NOT NULL;
+```
+
+![Carga Ingreso UCI Medicacion](Carga%20IngresoUCI_Medicacion.png)
+
+## Dificultades encontradas
+
+Este trabajo ha resultado complejo por distintas cuestiones, tanto por dificultades técnicas (la constante caída de los servidores a las máquinas virtuales) como por complicaciones a la hora de importar los datos desde nuestra base.
+
+## Conclusión
+
+Durante este proyecto, hemos tomado conciencia de la vital importancia de la etapa de la **Integración de Datos**, ya que
+
+## Bibliografía
