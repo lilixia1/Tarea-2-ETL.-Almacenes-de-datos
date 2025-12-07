@@ -617,6 +617,12 @@ La clave primaria del paciente corresponde con *uniquePID*.
 
 #### 3.5 Carga Diagnosis por completar
 
+Para poblar la dimensión Diagnosis se diseñó un flujo ETL que permite transformar diagnósticos complejos en una estructura jerárquica acorde con el modelo en copo de nieve.
+
+1. Extracción
+Mediante la consulta SQL proporcionada se obtiene la información desde la tabla Diagnosis. En esta fase se descompone el campo diagnosisString, que contiene rutas diagnósticas separadas por |.
+La consulta genera cuatro niveles jerárquicos (diagnosisN1–N4), además de limpiar los campos diagnosisPriority e ICD9Code.
+
 ``` sql
 SELECT
     d.diagnosisID,
@@ -678,6 +684,17 @@ SELECT
 FROM dbo.Diagnosis d;
 ```
 
+2. Conversión de datos
+Se aplica un componente Data Conversion para transformar valores Unicode (DT_WSTR) en cadenas no Unicode (DT_STR), compatibles con las tablas dimensionales del DW.
+
+3. Lookups
+- Prioridad: relaciona cada diagnóstico con la tabla Prioridad, recuperando la clave sustituta asociada.
+
+- Clasificación: enlaza el diagnóstico con la dimensión Clasificación mediante el valor ICD9.
+
+4. Carga final
+Los datos ya transformados y normalizados se insertan en la tabla Diagnosis del Data Warehouse.
+
 ![Carga Diagnosis](Carga%20Diagnosis.png)
 
 12. **Carga Cuidados Respiratorios** por completar
@@ -714,7 +731,7 @@ FROM dbo.Medication AS m;
 
 ![Carga Medicacion](imagenes/Carga%20Medicacion.png)
 
-#### 3.7 Carga Hospital por completar
+#### 3.7 Carga Hospital
 
 La dimensión Hospital no requiere cálculos ni transformaciones complejas.
 
