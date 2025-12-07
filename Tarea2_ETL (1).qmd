@@ -242,7 +242,7 @@ Cuando se desactivan las restricciones, el proceso suprime los registros de toda
 
 En la captura de pantalla se muestra la configuración de la tarea Borrar Almacén UCI, en la que se detallan el SQLStatement y la opción IsQueryStoredProcedure, que señala que un procedimiento almacenado será ejecutado. De igual modo, más adelante se presenta el contenido íntegro del script Borrar, lo que posibilita observar en detalle la manera en que se manejan la eliminación de tablas, la desactivación de restricciones y la restauración final de la integridad referencial.
 
-![Ventana de información de Borrar Almacen UCI](Borrar%20Almacen%20UCI.png)
+![Ventana de información de Borrar Almacen UCI](imagenes/borrarAlmacen.png)
 
 ``` sql
 USE [AlmacenUCI] GO
@@ -303,7 +303,7 @@ SELECT DISTINCT Gender FROM Patient
 
 Así, se logra exclusivamente la lista de géneros registrados en los registros de pacientes, sin repeticiones. Una colección limitada de valores se transmite directamente al componente de destino utilizando un destino ADO NET, mediante la asignación de la columna "Gender" del origen a la columna "genero" del almacén de datos. La nueva base de datos generó automáticamente la clave idGenero. El flujo es simple y eficaz debido a que se trata de una dimensión muy pequeña (solamente dos valores en esta ocasión).
 
-![Carga Genero](Carga%20Genero.png)
+![Carga Genero](imagenes/Carga%20Genero.png)
 
 El proceso de carga de Etnia sigue el mismo patrón que el de Género, pero se ajusta a las características correspondientes. Una vez más, se realiza una consulta SQL en la tabla Patient a través de un origen ADO.NET:
 
@@ -313,7 +313,7 @@ SELECT DISTINCT Ethnicity FROM Patient;
 
 Esta instrucción permite la recuperación de todas las etnias que aparecen en los datos clínicos originales. El flujo envía el resultado a la ubicación Etnia en DW, donde se lleva a cabo un mapeo directo entre la columna de origen "Ethnicity" y la columna del almacén "etnia". La clave primaria (idEtnia) no se asigna en el flujo, como en la carga anterior, porque el Data Warehouse la produce automáticamente a través de su identidad configurada.
 
-![Carga Etnia](Carga%20Etnia.png)
+![Carga Etnia](imagenes/Carga%20Etnia.png)
 
 #### 2.2 Carga Prioridad y Clasificación
 
@@ -327,13 +327,13 @@ SELECT DISTINCT DiagnosisPriority FROM Diagnosis
 
 Con este comando, se obtienen solamente los valores que no son de prioridad, para evitar duplicados innecesarios. El resultado se manda directamente a ADO NET Prioridad en DW, donde la columna DiagnosisPriority se empareja con el atributo prioridad del Data Warehouse. Como la columna idPrioridad es una clave surrogate que se maneja como identidad en la tabla de destino, no se nutre desde el flujo. Este flujo carga tres filas, las cuales se corresponden con los tres niveles de importancia presentes en la información original.
 
-![Carga Prioridad](Carga%20Prioridad.png)
+![Carga Prioridad](imagenes/Carga%20Prioridad.png)
 
 En otra línea, la Carga Clasificación tiene la responsabilidad de completar la dimensión de códigos diagnósticos, que se fundamenta en el identificador ICD9Code. En esta situación, se establece el origen ADO.NET en modo "Tabla o vista", eligiendo "dbo"."Diagnosis" como tabla de entrada. Se mandan todas las filas requeridas al componente de conversión de datos a partir de ella, en el que se cambia el tipo de la columna ICD9Code al tipo DT_WSTR con una longitud de 50. Esto origina una nueva columna de salida llamada Copy of ICD9Code. Para que el formato del código diagnóstico coincida con la definición de la columna ICD9Code en la dimensión de destino, es preciso realizar esta conversión.
 
 Finalmente, el flujo se conecta con la clasificación ADO NET en DW. Copy of ICD9Code se relaciona con el atributo ICD9Code de la tabla de dimensión en las asignaciones de columnas, pero la clave idClasificacion se vuelve a crear automáticamente como identidad en el Data Warehouse. Este procedimiento carga aproximadamente 6.473 filas, que corresponden a los variados códigos ICD9 que aparecen en la tabla de diagnósticos de la UCI.
 
-![Carga Clasificacion](Carga%20Clasificacion.png)
+![Carga Clasificacion](imagenes/Carga%20Clasificacion.png)
 
 #### 2.3 Carga VíaAérea
 
@@ -347,7 +347,7 @@ FROM dbo.RespiratoryCare;
 
 Se obtuvieron tres categorías diferentes *Oral ETT*, *Tracheostomy* y *No Artificial Airway*, sumándole la creada artificialmente como *DESCONOCIDA*. Después, se procedió a introducir los resultados en el almacén, en la variable **airwayType** de la tabla **VíaAerea**. Se omitió la asignación para el **idViaAerea** ya que al construir la estructura del almacén se especificó que fuera un identificador autoincrementado.
 
-![Carga ViaAerea](Carga%20ViaAerea.png)
+![Carga ViaAerea](imagenes/Carga%20ViaAerea.png)
 
 #### 2.4 Carga Categoria y Administración
 
@@ -362,7 +362,7 @@ WHERE TRY_CAST(GTC AS int) IS NOT NULL;
 
 Obtuvimos 41 filas diferentes, posteriormente en nuestra tabla de destino del DW se asoció *GTCCode* con *GTC* y se dejó que el *idCategoria* se asignase con valores autoincrementados.
 
-![Carga Categoria](Carga%20Categoria.png)
+![Carga Categoria](imagenes/Carga%20Categoria.png)
 
 Para **Administración**, ya que un medicamento puede administrarse por distintas técnicas, se normalizó la variable *RouteAdmin* de la BD mediante el siguiente comando SQL y se renombró a *viaAdministracion*:
 
@@ -376,7 +376,7 @@ WHERE RouteAdmin IS NOT NULL
 
 Obtuvimos 164 filas diferentes y se realizó una conversión de datos, se mantuvo el tipo cadena Unicode \[DT_WSTR\] y se redujo la longitud a 50. Tras esto, el flujo finaliza insertando la información en la tabla **Administración** del almacén, asociando viaAdministracion con la copia transformada y manteniendo **idAdministración** como autoincrementado.
 
-![Carga Administracion](Carga%20Administracion.png) \#### 2.5 Carga Región y Tamaño
+![Carga Administracion](imagenes/Carga%20Administracion.png) \#### 2.5 Carga Región y Tamaño
 
 La importación normalizada de regiones y tamaño asociados a hospitales, se desarrolló de la siguiente forma: en el caso de **Carga Región** el flujo de datos es muy sencillo, un origen ADO NET que accede a la base de datos para consultar las distintas regiones presentes en la tabla **Hospital**, una conversión de datos a cadena Unicode de longitud 50 y un destino ADO NET, vinculado a la tabla Region del Data Warehouse. En este flujo, el atributo *region* se utiliza para almacenar el nombre de la región, mientras que el atributo *regionID* es una clave autogenerada, por lo que no es necesario rellenarla manualmente. En total se distinguen 5 regiones.
 
@@ -384,7 +384,7 @@ La importación normalizada de regiones y tamaño asociados a hospitales, se des
 SELECT DISTINCT Region FROM Hospital
 ```
 
-![Carga Region](Carga%20Region.png)
+![Carga Region](imagenes/Carga%20Region.png)
 
 Para **Carga Tamaño**, se escogió el atributo *NumBedsCategory* que describía el rango de camas que tenía la unidad UCI en cuestión. Se normalizaron los valores y se importaron a nuestra tabla **Tamaño** del DW. En concreto había 5 intervalos distintos: NULL, \<100, 100-249, 250-499, \>=500.
 
@@ -392,7 +392,7 @@ Para **Carga Tamaño**, se escogió el atributo *NumBedsCategory* que describía
 Select Distinct NumBedsCategory FROM Hospital;
 ```
 
-![Carga Tamaño](Carga%20TamanoHospital.png)
+![Carga Tamaño](imagenes/Carga%20TamanoHospital.png)
 
 ### 3. **Carga de Dimensiones**
 
@@ -453,7 +453,7 @@ El producto de esta consulta nutre un proceso de transformación de datos. En el
 
 Para concluir, el flujo se dirige a la tabla Admision del DW, utilizando ADO.NET. En el proceso de mapeo de columnas, asignamos a la columna clave admisionID el campo admissiondxid; a sus respectivas columnas, rutaAdmisionN1…rutaAdmisionN7, cada copia convertida: Copy of rutaAdmisionN1…Copy of rutaAdmisionN7; y a diagnosticoAdmision, finalmente, Copy of admitdxname. Así, las 825 filas que se leyeron de la tabla fuente se introducen directamente en la dimensión de admisión del almacén. Se mantiene tanto el identificador original como la descomposición jerárquica de la ruta diagnóstica.
 
-![Carga Admision](Carga%20Admision.png)
+![Carga Admision](imagenes/Carga%20Admision.png)
 
 #### 3.2 Carga Tiempo
 
@@ -481,7 +481,7 @@ WHERE horaAlta IS NOT NULL;
 
 El resultado de la consulta se envía directamente al destino Tiempo en DW, donde se insertan los registros en la tabla de la dimensión Tiempo del almacén AlmacenUCI. En el editor de asignación de columnas se mapean uno a uno los campos del origen (tiempoID, horaAdmision, horaAlta, anioAlta) con sus correspondientes de la tabla de destino.
 
-![Carga Tiempo](Carga%20Tiempo.png)
+![Carga Tiempo](imagenes/Carga%20Tiempo.png)
 
 #### 3.3 Carga Tratamiento
 
@@ -562,7 +562,7 @@ Tras esta consulta se realiza una conversión de datos. En ella, transformamos l
 
 Para concluir, el flujo se dirige a la tabla Tratamiento del DW, utilizando ADO.NET. En el proceso de mapeo de columnas, asignamos a la columna clave tratamientoID el campo treatmentID, además de los tratamientoN1-N4 a sus respectivas con las copia de tratamientoN1-N4. Así, las 7801 filas que se leyeron de la tabla fuente se introducen directamente en la dimensión de admisión del almacén. Se mantiene tanto el identificador original como la descomposición jerárquica del tratamiento asignado al paciente.
 
-![Carga Tratamiento](Carga%20Tratamiento.png)
+![Carga Tratamiento](imagenes/Carga%20Tratamiento.png)
 
 #### 3.4 Carga Paciente por completar
 
@@ -668,7 +668,7 @@ SELECT
 FROM dbo.RespiratoryCare AS r;
 ```
 
-![Carga Cuidados Respiratorios](Carga%20CuidadosRespiratorios.png)
+![Carga Cuidados Respiratorios](imagenes/Carga%20CuidadosRespiratorios.png)
 
 #### 3.6 Carga Medicacion por completar
 
@@ -688,13 +688,13 @@ SELECT
 FROM dbo.Medication AS m;
 ```
 
-![Carga Medicacion](Carga%20Medicacion.png)
+![Carga Medicacion](imagenes/Carga%20Medicacion.png)
 
 #### 3.7 Carga Hospital por completar
 
 No se realizó ninguna consulta, se seleccionó directamente la tabla **Hospital**.
 
-![Carga Hospital](Carga%20Hospital.png)
+![Carga Hospital](imagenes/Carga%20Hospital.png)
 
 ### 4. **Carga del Hecho: Ingreso UCI** por completar
 
@@ -794,7 +794,7 @@ JOIN UCIreducida.dbo.Diagnosis AS d
     ON d.patientUnitStayID = i.patientUnitStayID;
 ```
 
-![Carga Ingreso UCI Diagnosis](Carga%20IngresoUCI_Diagnosis.png)
+![Carga Ingreso UCI Diagnosis](imagenes/Carga%20IngresoUCI_Diagnosis.png)
 
 #### 2. Carga Ingreso UCI - Admision
 
@@ -809,7 +809,7 @@ JOIN AlmacenUCI.dbo.IngresoUCI AS i
 WHERE ad.AdmissionDxID IS NOT NULL;
 ```
 
-![Carga Ingreso UCI Admision](Carga%20IngresoUCI_Admision.png)
+![Carga Ingreso UCI Admision](imagenes/Carga%20IngresoUCI_Admision.png)
 
 #### 3. Carga Ingreso UCI - Tratamiento
 
@@ -824,7 +824,7 @@ JOIN UCIreducida.dbo.Treatment AS t
 WHERE t.treatmentID IS NOT NULL;
 ```
 
-![Carga Ingreso UCI Tratamiento](Carga%20IngresoUCI_Tratamiento.png)
+![Carga Ingreso UCI Tratamiento](imagenes/Carga%20IngresoUCI_Tratamiento.png)
 
 #### 4. Carga Ingreso UCI - Cuidados Respiratorios
 
@@ -839,7 +839,7 @@ JOIN UCIreducida.dbo.RespiratoryCare AS rc
 WHERE rc.respCareID IS NOT NULL;
 ```
 
-![Carga Ingreso UCI Cuidados Respiratorios](Carga%20IngresoUCI_CuidadosRespiratorios.png)
+![Carga Ingreso UCI Cuidados Respiratorios](imagenes/Carga%20IngresoUCI_CuidadosRespiratorios.png)
 
 #### 5. Carga Ingreso UCI - Medicacion
 
@@ -854,7 +854,7 @@ JOIN UCIreducida.dbo.Medication AS m
 WHERE m.medicationID IS NOT NULL;
 ```
 
-![Carga Ingreso UCI Medicacion](Carga%20IngresoUCI_Medicacion.png)
+![Carga Ingreso UCI Medicacion](imagenes/Carga%20IngresoUCI_Medicacion.png)
 
 ## Dificultades encontradas
 
